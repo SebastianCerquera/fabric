@@ -87,7 +87,8 @@ def index():
 
 
 def main():
-    app.run(host="127.0.0.1", port=13338, debug=True)
+    ## https://g.co/gemini/share/bbc6170434fd
+    app.run(host="0.0.0.0", port=13338, debug=True)
 
 
 if __name__ == "__main__":

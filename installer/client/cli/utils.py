@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 import zipfile
 import tempfile
 import subprocess
-import re
 import shutil
+from youtube_transcript_api import YouTubeTranscriptApi
 
 current_directory = os.path.dirname(os.path.realpath(__file__))
 config_directory = os.path.expanduser("~/.config/fabric")
@@ -38,12 +38,11 @@ class Standalone:
         if args is None:
             args = type('Args', (), {})()
         env_file = os.path.expanduser(env_file)
+        self.client = None
         load_dotenv(env_file)
-        assert 'OPENAI_API_KEY' in os.environ, "Error: OPENAI_API_KEY not found in environment variables. Please run fabric --setup and add a key."
-        api_key = os.environ['OPENAI_API_KEY']
-        base_url = os.environ.get(
-            'OPENAI_BASE_URL', 'https://api.openai.com/v1/')
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        if "OPENAI_API_KEY" in os.environ:
+            api_key = os.environ['OPENAI_API_KEY']
+            self.client = OpenAI(api_key=api_key)
         self.local = False
         self.config_pattern_directory = config_directory
         self.pattern = pattern
@@ -55,6 +54,9 @@ class Standalone:
                 self.model = 'gpt-4-turbo-preview'
         self.claude = False
         sorted_gpt_models, ollamaList, claudeList = self.fetch_available_models()
+        self.sorted_gpt_models = sorted_gpt_models
+        self.ollamaList = ollamaList
+        self.claudeList = claudeList
         self.local = self.model in ollamaList
         self.claude = self.model in claudeList
 
@@ -62,7 +64,7 @@ class Standalone:
         from ollama import AsyncClient
         response = None
         if host:
-            response = await AsyncClient(host=host).chat(model=self.model, messages=messages, host=host)
+            response = await AsyncClient(host=host).chat(model=self.model, messages=messages)
         else:
             response = await AsyncClient().chat(model=self.model, messages=messages)
         print(response['message']['content'])
@@ -73,7 +75,7 @@ class Standalone:
     async def localStream(self, messages, host=''):
         from ollama import AsyncClient
         if host:
-            async for part in await AsyncClient(host=host).chat(model=self.model, messages=messages, stream=True, host=host):
+            async for part in await AsyncClient(host=host).chat(model=self.model, messages=messages, stream=True):
                 print(part['message']['content'], end='', flush=True)
         else:
             async for part in await AsyncClient().chat(model=self.model, messages=messages, stream=True):
@@ -277,40 +279,41 @@ class Standalone:
     def fetch_available_models(self):
         gptlist = []
         fullOllamaList = []
-        claudeList = ['claude-3-opus-20240229',
-                      'claude-3-sonnet-20240229',
-                      'claude-3-haiku-20240307',
-                      'claude-2.1']
-        try:
-            models = [model.id.strip()
-                      for model in self.client.models.list().data]
-        except APIConnectionError as e:
-            if getattr(e.__cause__, 'args', [''])[0] == "Illegal header value b'Bearer '":
-                print("Error: Cannot connect to the OpenAI API Server because the API key is not set. Please run fabric --setup and add a key.")
+        if "CLAUDE_API_KEY" in os.environ:
+            claudeList = ['claude-3-opus-20240229', 'claude-3-sonnet-20240229',
+                          'claude-3-haiku-20240307', 'claude-2.1']
+        else:
+            claudeList = []
 
-            else:
-                print(
-                    f"Error: {e.message} trying to access {e.request.url}: {getattr(e.__cause__, 'args', [''])}")
-            sys.exit()
+        try:
+            if self.client:
+                models = [model.id.strip()
+                          for model in self.client.models.list().data]
+                if "/" in models[0] or "\\" in models[0]:
+                    gptlist = [item[item.rfind(
+                        "/") + 1:] if "/" in item else item[item.rfind("\\") + 1:] for item in models]
+                else:
+                    gptlist = [item.strip()
+                               for item in models if item.startswith("gpt")]
+                gptlist.sort()
+        except APIConnectionError as e:
+            pass
         except Exception as e:
             print(f"Error: {getattr(e.__context__, 'args', [''])[0]}")
             sys.exit()
-        if "/" in models[0] or "\\" in models[0]:
-            # lmstudio returns full paths to models. Iterate and truncate everything before and including the last slash
-            gptlist = [item[item.rfind(
-                "/") + 1:] if "/" in item else item[item.rfind("\\") + 1:] for item in models]
-        else:
-            # Keep items that start with "gpt"
-            gptlist = [item.strip()
-                       for item in models if item.startswith("gpt")]
-        gptlist.sort()
+
         import ollama
         try:
-            default_modelollamaList = ollama.list()['models']
+            if self.args.remoteOllamaServer:
+                client = ollama.Client(host=self.args.remoteOllamaServer)
+                default_modelollamaList = client.list()['models']
+            else:
+                default_modelollamaList = ollama.list()['models']
             for model in default_modelollamaList:
                 fullOllamaList.append(model['name'])
         except:
             fullOllamaList = []
+
         return gptlist, fullOllamaList, claudeList
 
     def get_cli_input(self):
@@ -332,6 +335,23 @@ class Standalone:
                 return input("Enter Question: ")
         else:
             return sys.stdin.read()
+
+    def agents(self, userInput):
+        from praisonai import PraisonAI
+        model = self.model
+        os.environ["OPENAI_MODEL_NAME"] = model
+        if model in self.sorted_gpt_models:
+            os.environ["OPENAI_API_BASE"] = "https://api.openai.com/v1/"
+        elif model in self.ollamaList:
+            os.environ["OPENAI_API_BASE"] = "http://localhost:11434/v1"
+            os.environ["OPENAI_API_KEY"] = "NA"
+
+        elif model in self.claudeList:
+            print("Claude is not supported in this mode")
+            sys.exit()
+        print("Starting PraisonAI...")
+        praison_ai = PraisonAI(auto=userInput, framework="autogen")
+        praison_ai.main()
 
 
 class Update:
